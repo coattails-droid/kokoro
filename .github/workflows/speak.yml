@@ -1,0 +1,110 @@
+name: speak
+
+# Turn text into speech with Kokoro on GitHub's free CPU runners.
+# Go to Actions > speak > Run workflow, type your text, then download the "speech" artifact.
+
+on:
+  workflow_dispatch:
+    inputs:
+      text:
+        description: "Text to speak"
+        required: true
+        type: string
+      voice:
+        description: >-
+          Voice. US English: af_heart, af_bella, af_nicole, af_sarah, af_sky, am_adam, am_michael, am_fenrir, am_puck.
+          UK English: bf_emma, bf_isabella, bm_george, bm_fable. Spanish: ef_dora, em_alex. French: ff_siwis.
+          Hindi: hf_alpha, hm_omega. Italian: if_sara, im_nicola. Portuguese: pf_dora, pm_alex.
+          Japanese: jf_alpha, jm_kumo. Chinese: zf_xiaoxiao, zm_yunxi.
+        required: false
+        default: af_heart
+        type: string
+      speed:
+        description: "Speed (0.5 = slow, 1.0 = normal, 2.0 = fast)"
+        required: false
+        default: "1.0"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: speak-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  speak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TEXT: ${{ inputs.text }}
+      VOICE: ${{ inputs.voice }}
+      SPEED: ${{ inputs.speed }}
+      PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu
+      HF_HUB_DISABLE_PROGRESS_BARS: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/workflows/speak.yml
+
+      - name: Cache Kokoro model and voices
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-kokoro-${{ inputs.voice }}-v1
+          restore-keys: hf-kokoro-
+
+      - name: Install system tools (espeak-ng, ffmpeg)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq espeak-ng ffmpeg > /dev/null
+
+      - name: Install Kokoro (CPU only)
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install . soundfile
+          case "$VOICE" in
+            j*) pip install "misaki[ja]" ;;
+            z*) pip install "misaki[zh]" ;;
+          esac
+
+      - name: Generate speech
+        run: |
+          mkdir -p out
+          python - <<'PY'
+          import os, numpy as np, soundfile as sf
+          from kokoro import KPipeline
+          text = os.environ["TEXT"].strip()
+          voice = (os.environ.get("VOICE") or "af_heart").strip()
+          try:
+              speed = float(os.environ.get("SPEED") or 1.0)
+          except ValueError:
+              speed = 1.0
+          speed = min(max(speed, 0.5), 2.0)
+          if not text:
+              raise SystemExit("Please type some text to speak.")
+          pipeline = KPipeline(lang_code=voice[0], repo_id="hexgrad/Kokoro-82M")
+          chunks = [audio for _, _, audio in pipeline(text, voice=voice, speed=speed, split_pattern=r"\n+")]
+          if not chunks:
+              raise SystemExit("No audio was produced.")
+          audio = np.concatenate([np.asarray(c) for c in chunks])
+          sf.write("out/speech.wav", audio, 24000)
+          print(f"Voice {voice}, speed {speed}: {len(audio)/24000:.1f} seconds of audio")
+          PY
+          ffmpeg -loglevel error -y -i out/speech.wav -codec:a libmp3lame -qscale:a 2 out/speech.mp3
+          printf '%s\n' "$TEXT" > out/text.txt
+          ls -la out
+
+      - name: Upload audio
+        uses: actions/upload-artifact@v4
+        with:
+          name: speech
+          path: out/
+          retention-days: 7
