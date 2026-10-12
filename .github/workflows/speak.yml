@@ -71,7 +71,7 @@ jobs:
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install . soundfile
           case "$VOICE" in
-            j*) pip install "misaki[ja]" ;;
+            j*) pip install "misaki[ja]" && python -m unidic download ;;
             z*) pip install "misaki[zh]" ;;
           esac
 
